@@ -1,111 +1,60 @@
-name: Build PyApps APK
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
-      - name: Setup JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+    </queries>
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
+    <application
+        android:label="PyApps Host"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:hardwareAccelerated="true"
+        android:usesCleartextTraffic="true"
+        android:enableOnBackInvokedCallback="false"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
-      - name: Generate Gradle settings and app icon
-        run: |
-          cat << 'EOF' > settings.gradle
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          rootProject.name = "PyAppsHost"
-          EOF
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
-          cat << 'EOF' > gradle.properties
-          android.useAndroidX=false
-          org.gradle.jvmargs=-Xmx2048m
-          EOF
+        <service
+            android:name=".PyAccessibilityService"
+            android:label="PyApps Automation"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
 
-          mkdir -p src/main/res/drawable src/main/res/mipmap-anydpi-v26
-
-          cat << 'EOF' > src/main/res/drawable/ic_launcher_bg.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-              <solid android:color="#09090b" />
-          </shape>
-          EOF
-
-          cat << 'EOF' > src/main/res/drawable/ic_launcher_fg.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="108dp"
-              android:height="108dp"
-              android:viewportWidth="108"
-              android:viewportHeight="108">
-              <path
-                  android:fillColor="#111827"
-                  android:strokeColor="#2563eb"
-                  android:strokeWidth="2.5"
-                  android:pathData="M32,26 L76,26 Q82,26 82,32 L82,76 Q82,82 76,82 L32,82 Q26,82 26,76 L26,32 Q26,26 32,26 Z" />
-              <path
-                  android:strokeColor="#3b82f6"
-                  android:strokeWidth="5"
-                  android:strokeLineCap="round"
-                  android:strokeLineJoin="round"
-                  android:pathData="M44,43 L34,54 L44,65" />
-              <path
-                  android:strokeColor="#3b82f6"
-                  android:strokeWidth="5"
-                  android:strokeLineCap="round"
-                  android:strokeLineJoin="round"
-                  android:pathData="M64,43 L74,54 L64,65" />
-              <path
-                  android:fillColor="#38bdf8"
-                  android:pathData="M49,45 L60,54 L49,63 Z" />
-          </vector>
-          EOF
-
-          cat << 'EOF' > src/main/res/mipmap-anydpi-v26/ic_launcher.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-              <background android:drawable="@drawable/ic_launcher_bg" />
-              <foreground android:drawable="@drawable/ic_launcher_fg" />
-          </adaptive-icon>
-          EOF
-
-          cp src/main/res/mipmap-anydpi-v26/ic_launcher.xml src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
-
-      - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
-
-      - name: Prepare APK artifact
-        run: cp build/outputs/apk/debug/*.apk PyAppsHost.apk
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v7
-        with:
-          path: PyAppsHost.apk
-          archive: false
-          if-no-files-found: error
+    </application>
+</manifest>
