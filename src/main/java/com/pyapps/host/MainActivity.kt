@@ -763,6 +763,135 @@ class PyAccessibilityService : AccessibilityService() {
     companion object {
         @Volatile
         var instance: PyAccessibilityService? = null
+
+        private val FLOAT_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      color: #fafafa;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow-x: hidden;
+    }
+    #_float_stage { width: 100%; min-height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="_float_stage"></div>
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.27.8/full/pyodide.js"></script>
+  <script>
+    const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.27.8/full/";
+    let activeNamespace = null;
+    let pyodide = null;
+
+    async function callPythonFunction(name, args) {
+      if (!activeNamespace || !activeNamespace.has(name)) {
+        throw new Error("Python function '" + name + "' not found");
+      }
+      const fn = activeNamespace.get(name);
+      try {
+        let res = fn(...args);
+        if (res && typeof res.then === "function") res = await res;
+        if (res && typeof res.toJs === "function") {
+          const jsVal = res.toJs({ dict_converter: Object.fromEntries });
+          res.destroy();
+          return jsVal;
+        }
+        return res;
+      } finally {
+        if (fn && typeof fn.destroy === "function") fn.destroy();
+      }
+    }
+
+    window.py_call = (name, ...args) => callPythonFunction(name, args);
+    window.pywebview = {
+      api: new Proxy({}, {
+        get(_, prop) {
+          return (...args) => callPythonFunction(String(prop), args);
+        }
+      })
+    };
+
+    function mountHtml(htmlStr) {
+      const stage = document.getElementById("_float_stage");
+      document.querySelectorAll('[data-user-app="true"]').forEach(el => el.remove());
+      const doc = new DOMParser().parseFromString(htmlStr, "text/html");
+      doc.querySelectorAll("style, link[rel='stylesheet']").forEach(node => {
+        const clone = document.createElement(node.tagName.toLowerCase());
+        for (const attr of node.attributes) clone.setAttribute(attr.name, attr.value);
+        clone.setAttribute("data-user-app", "true");
+        clone.textContent = node.textContent;
+        document.head.appendChild(clone);
+      });
+      const scripts = Array.from(doc.querySelectorAll("script"));
+      scripts.forEach(s => s.remove());
+      stage.innerHTML = doc.body.innerHTML;
+      for (const s of scripts) {
+        const ns = document.createElement("script");
+        for (const attr of s.attributes) ns.setAttribute(attr.name, attr.value);
+        ns.setAttribute("data-user-app", "true");
+        if (!s.src) ns.textContent = s.textContent;
+        stage.appendChild(ns);
+      }
+    }
+
+    window._bootFloat = async (payload) => {
+      const looksLikePy = payload.includes("HTML =") || payload.includes("html =") || payload.includes("def ") || payload.includes("import ");
+      if (!looksLikePy) {
+        mountHtml(payload);
+        return;
+      }
+      const stage = document.getElementById("_float_stage");
+      stage.innerHTML = "<div style='padding:10px;font-size:12px;color:#a1a1aa;'>Starting floating Python...</div>";
+      try {
+        if (!pyodide) {
+          pyodide = await loadPyodide({ indexURL: PYODIDE_URL });
+          pyodide.runPython([
+            "import ast",
+            "def _host_extract_html(code_str):",
+            "    try:",
+            "        tree = ast.parse(code_str)",
+            "        for node in tree.body:",
+            "            if isinstance(node, ast.Assign):",
+            "                for t in node.targets:",
+            "                    if isinstance(t, ast.Name) and t.id in ('HTML', 'html'):",
+            "                        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):",
+            "                            return node.value.value",
+            "    except Exception:",
+            "        pass",
+            "    return None"
+          ].join("\n"));
+        }
+        const extractor = pyodide.globals.get("_host_extract_html");
+        const staticHtml = extractor(payload);
+        extractor.destroy();
+        let mounted = false;
+        if (typeof staticHtml === "string") {
+          mountHtml(staticHtml);
+          mounted = true;
+        }
+        if (activeNamespace) activeNamespace.destroy();
+        activeNamespace = pyodide.runPython("{}");
+        try { await pyodide.loadPackagesFromImports(payload); } catch (_) {}
+        await pyodide.runPythonAsync(payload, { globals: activeNamespace });
+        if (!mounted) {
+          const dynKey = activeNamespace.has("HTML") ? "HTML" : (activeNamespace.has("html") ? "html" : null);
+          if (dynKey) mountHtml(activeNamespace.get(dynKey));
+        }
+      } catch (err) {
+        stage.innerHTML = "<div style='padding:10px;color:#fca5a5;font-family:monospace;font-size:11px;white-space:pre-wrap;'>" + String(err).replace(/</g, "&lt;") + "</div>";
+      }
+    };
+  </script>
+</body>
+</html>
+        """
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -1097,137 +1226,6 @@ class PyAccessibilityService : AccessibilityService() {
             val child = node.getChild(i) ?: continue
             collectNodes(child, arr, limit)
         }
-    }
-
-    companion object {
-        private val FLOAT_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      background: transparent;
-      color: #fafafa;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      overflow-x: hidden;
-    }
-    #_float_stage { width: 100%; min-height: 100%; }
-  </style>
-</head>
-<body>
-  <div id="_float_stage"></div>
-  <script src="https://cdn.jsdelivr.net/pyodide/v0.27.8/full/pyodide.js"></script>
-  <script>
-    const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.27.8/full/";
-    let activeNamespace = null;
-    let pyodide = null;
-
-    async function callPythonFunction(name, args) {
-      if (!activeNamespace || !activeNamespace.has(name)) {
-        throw new Error("Python function '" + name + "' not found");
-      }
-      const fn = activeNamespace.get(name);
-      try {
-        let res = fn(...args);
-        if (res && typeof res.then === "function") res = await res;
-        if (res && typeof res.toJs === "function") {
-          const jsVal = res.toJs({ dict_converter: Object.fromEntries });
-          res.destroy();
-          return jsVal;
-        }
-        return res;
-      } finally {
-        if (fn && typeof fn.destroy === "function") fn.destroy();
-      }
-    }
-
-    window.py_call = (name, ...args) => callPythonFunction(name, args);
-    window.pywebview = {
-      api: new Proxy({}, {
-        get(_, prop) {
-          return (...args) => callPythonFunction(String(prop), args);
-        }
-      })
-    };
-
-    function mountHtml(htmlStr) {
-      const stage = document.getElementById("_float_stage");
-      document.querySelectorAll('[data-user-app="true"]').forEach(el => el.remove());
-      const doc = new DOMParser().parseFromString(htmlStr, "text/html");
-      doc.querySelectorAll("style, link[rel='stylesheet']").forEach(node => {
-        const clone = document.createElement(node.tagName.toLowerCase());
-        for (const attr of node.attributes) clone.setAttribute(attr.name, attr.value);
-        clone.setAttribute("data-user-app", "true");
-        clone.textContent = node.textContent;
-        document.head.appendChild(clone);
-      });
-      const scripts = Array.from(doc.querySelectorAll("script"));
-      scripts.forEach(s => s.remove());
-      stage.innerHTML = doc.body.innerHTML;
-      for (const s of scripts) {
-        const ns = document.createElement("script");
-        for (const attr of s.attributes) ns.setAttribute(attr.name, attr.value);
-        ns.setAttribute("data-user-app", "true");
-        if (!s.src) ns.textContent = s.textContent;
-        stage.appendChild(ns);
-      }
-    }
-
-    window._bootFloat = async (payload) => {
-      const looksLikePy = payload.includes("HTML =") || payload.includes("html =") || payload.includes("def ") || payload.includes("import ");
-      if (!looksLikePy) {
-        mountHtml(payload);
-        return;
-      }
-      const stage = document.getElementById("_float_stage");
-      stage.innerHTML = "<div style='padding:10px;font-size:12px;color:#a1a1aa;'>Starting floating Python...</div>";
-      try {
-        if (!pyodide) {
-          pyodide = await loadPyodide({ indexURL: PYODIDE_URL });
-          pyodide.runPython([
-            "import ast",
-            "def _host_extract_html(code_str):",
-            "    try:",
-            "        tree = ast.parse(code_str)",
-            "        for node in tree.body:",
-            "            if isinstance(node, ast.Assign):",
-            "                for t in node.targets:",
-            "                    if isinstance(t, ast.Name) and t.id in ('HTML', 'html'):",
-            "                        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):",
-            "                            return node.value.value",
-            "    except Exception:",
-            "        pass",
-            "    return None"
-          ].join("\n"));
-        }
-        const extractor = pyodide.globals.get("_host_extract_html");
-        const staticHtml = extractor(payload);
-        extractor.destroy();
-        let mounted = false;
-        if (typeof staticHtml === "string") {
-          mountHtml(staticHtml);
-          mounted = true;
-        }
-        if (activeNamespace) activeNamespace.destroy();
-        activeNamespace = pyodide.runPython("{}");
-        try { await pyodide.loadPackagesFromImports(payload); } catch (_) {}
-        await pyodide.runPythonAsync(payload, { globals: activeNamespace });
-        if (!mounted) {
-          const dynKey = activeNamespace.has("HTML") ? "HTML" : (activeNamespace.has("html") ? "html" : null);
-          if (dynKey) mountHtml(activeNamespace.get(dynKey));
-        }
-      } catch (err) {
-        stage.innerHTML = "<div style='padding:10px;color:#fca5a5;font-family:monospace;font-size:11px;white-space:pre-wrap;'>" + String(err).replace(/</g, "&lt;") + "</div>";
-      }
-    };
-  </script>
-</body>
-</html>
-        """
     }
 }
 
