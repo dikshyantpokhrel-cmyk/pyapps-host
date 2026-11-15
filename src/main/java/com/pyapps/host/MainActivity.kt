@@ -134,7 +134,7 @@ class NativeCore(
     private var ttsReady = false
     private var pendingTtsText: String? = null
 
-    var activeCode: String = ""
+    private var activeCode: String = ""
 
     private val appsDir: File by lazy {
         File(context.filesDir, "apps").apply { if (!exists()) mkdirs() }
