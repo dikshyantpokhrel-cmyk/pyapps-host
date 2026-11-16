@@ -777,9 +777,16 @@ class PyAccessibilityService : AccessibilityService() {
       background: transparent;
       color: #fafafa;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      overflow-x: hidden;
+      height: 100%;
+      overflow: hidden;
     }
-    #_float_stage { width: 100%; min-height: 100%; }
+    #_float_stage {
+      width: 100%;
+      height: 100%;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+    }
   </style>
 </head>
 <body>
@@ -1460,7 +1467,8 @@ class MainActivity : Activity() {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       overscroll-behavior: none;
       -webkit-tap-highlight-color: transparent;
-      min-height: 100vh;
+      min-height: 100dvh;
+      overflow-y: auto;
     }
     #_host_launcher {
       max-width: 680px;
@@ -1591,7 +1599,14 @@ class MainActivity : Activity() {
       cursor: pointer;
     }
     ._host_icon_btn.del { color: #fca5a5; }
-    #_host_stage { display: none; width: 100%; min-height: 100vh; }
+    #_host_stage {
+      display: none;
+      width: 100%;
+      height: 100dvh;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+    }
     #_host_back_pill {
       display: none;
       position: fixed;
