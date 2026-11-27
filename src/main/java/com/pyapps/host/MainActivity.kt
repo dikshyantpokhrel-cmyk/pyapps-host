@@ -3,6 +3,7 @@ package com.pyapps.host
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
@@ -22,6 +23,9 @@ import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
@@ -29,6 +33,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.provider.MediaStore
@@ -43,6 +48,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.webkit.GeolocationPermissions
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -65,6 +71,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 object PyodideAssets {
     fun corsHeaders(): Map<String, String> = mapOf(
@@ -359,7 +366,9 @@ class NativeCore(
         mainHandler.post {
             val perms = mutableListOf(
                 Manifest.permission.CAMERA,
-                Manifest.permission.RECORD_AUDIO
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
             )
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 perms.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -379,11 +388,14 @@ class NativeCore(
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         } else true
         val acc = PyAccessibilityService.instance != null
+        val loc = context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         return JSONObject().apply {
             put("camera", cam)
             put("mic", mic)
             put("notifications", notif)
             put("accessibility", acc)
+            put("location", loc)
         }.toString()
     }
 
@@ -586,6 +598,39 @@ class NativeCore(
     }
 
     @JavascriptInterface
+    fun snapFloatingToEdge(durationMs: Int): Boolean {
+        return PyAccessibilityService.instance?.snapFloatingToEdge(durationMs) ?: false
+    }
+
+    @JavascriptInterface
+    fun startFloatingBubble(codeOrHtml: String, sizeDp: Int): Boolean {
+        val svc = PyAccessibilityService.instance
+        if (svc == null) {
+            toast("Enable Automation in launcher first")
+            return false
+        }
+        val payload = if (codeOrHtml.isBlank()) activeCode else codeOrHtml
+        if (payload.isBlank()) return false
+        svc.showFloating(payload, sizeDp, sizeDp, true)
+        return true
+    }
+
+    @JavascriptInterface
+    fun getFloatingInfo(): String {
+        return PyAccessibilityService.instance?.getFloatingInfo() ?: "{}"
+    }
+
+    @JavascriptInterface
+    fun animateFloating(xPx: Int, yPx: Int, widthDp: Int, heightDp: Int, durationMs: Int): Boolean {
+        return PyAccessibilityService.instance?.animateFloating(xPx, yPx, widthDp, heightDp, durationMs) ?: false
+    }
+
+    @JavascriptInterface
+    fun setFloatingFocusable(enabled: Boolean) {
+        PyAccessibilityService.instance?.setFloatingFocusable(enabled)
+    }
+
+    @JavascriptInterface
     fun autoTap(x: Float, y: Float): Boolean {
         return PyAccessibilityService.instance?.tap(x, y) ?: false
     }
@@ -735,6 +780,66 @@ class NativeCore(
         }
         try { latch.await() } catch (_: Exception) {}
         return res
+    }
+
+    @Suppress("DEPRECATION")
+    @JavascriptInterface
+    fun getLocation(): String {
+        val fine = context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarse = context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!fine && !coarse) {
+            requestPermissions()
+            return JSONObject().put("ok", false).put("error", "Location permission required").toString()
+        }
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+            ?: return JSONObject().put("ok", false).put("error", "Location service unavailable").toString()
+
+        var loc: Location? = null
+        try {
+            loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                ?: lm.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER)
+        } catch (_: Exception) {}
+
+        val fresh = loc != null && SystemClock.elapsedRealtimeNanos() - loc.elapsedRealtimeNanos < 120_000_000_000L
+        if (!fresh) {
+            val latch = CountDownLatch(1)
+            val holder = arrayOfNulls<Location>(1)
+            mainHandler.post {
+                try {
+                    val listener = object : LocationListener {
+                        override fun onLocationChanged(l: Location) {
+                            holder[0] = l
+                            try { lm.removeUpdates(this) } catch (_: Exception) {}
+                            latch.countDown()
+                        }
+                        @Deprecated("Deprecated in Java")
+                        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+                        override fun onProviderEnabled(provider: String) {}
+                        override fun onProviderDisabled(provider: String) {}
+                    }
+                    lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 0L, 0f, listener)
+                    mainHandler.postDelayed({
+                        try { lm.removeUpdates(listener) } catch (_: Exception) {}
+                        latch.countDown()
+                    }, 4000)
+                } catch (_: Exception) {
+                    latch.countDown()
+                }
+            }
+            try { latch.await(5, TimeUnit.SECONDS) } catch (_: Exception) {}
+            holder[0]?.let { loc = it }
+        }
+
+        val l = loc ?: return JSONObject().put("ok", false).put("error", "No location fix yet").toString()
+        return JSONObject().apply {
+            put("ok", true)
+            put("lat", l.latitude)
+            put("lon", l.longitude)
+            put("accuracy", l.accuracy.toDouble())
+            put("provider", l.provider ?: "")
+            put("time", l.time)
+        }.toString()
     }
 
     @JavascriptInterface
@@ -941,7 +1046,7 @@ class PyAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
-    fun showFloating(codeOrHtml: String, widthDp: Int, heightDp: Int) {
+    fun showFloating(codeOrHtml: String, widthDp: Int, heightDp: Int, bubble: Boolean = false) {
         mainHandler.post {
             removeFloatingInternal()
             val windowMgr = wm ?: (getSystemService(Context.WINDOW_SERVICE) as WindowManager)
@@ -950,8 +1055,8 @@ class PyAccessibilityService : AccessibilityService() {
             core.setActiveCode(codeOrHtml)
 
             val density = resources.displayMetrics.density
-            val wPx = (widthDp.coerceIn(140, 440) * density).toInt()
-            val hPx = (heightDp.coerceIn(80, 700) * density).toInt()
+            val wPx = ((if (bubble) widthDp.coerceIn(40, 200) else widthDp.coerceIn(140, 440)) * density).toInt()
+            val hPx = ((if (bubble) heightDp.coerceIn(40, 200) else heightDp.coerceIn(80, 700)) * density).toInt()
 
             val params = WindowManager.LayoutParams(
                 wPx,
@@ -961,18 +1066,26 @@ class PyAccessibilityService : AccessibilityService() {
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
-                x = (16 * density).toInt()
-                y = (120 * density).toInt()
+                if (bubble) {
+                    val dm = resources.displayMetrics
+                    x = dm.widthPixels - wPx - (16 * density).toInt()
+                    y = dm.heightPixels - hPx - (120 * density).toInt()
+                } else {
+                    x = (16 * density).toInt()
+                    y = (120 * density).toInt()
+                }
             }
 
             val container = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#E609090b"))
-                    cornerRadius = 14 * density
-                    setStroke((1 * density).toInt(), Color.parseColor("#3f3f46"))
+                if (!bubble) {
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#E609090b"))
+                        cornerRadius = 14 * density
+                        setStroke((1 * density).toInt(), Color.parseColor("#3f3f46"))
+                    }
+                    clipToOutline = true
                 }
-                clipToOutline = true
             }
 
             val topBar = LinearLayout(this).apply {
@@ -1054,7 +1167,14 @@ class PyAccessibilityService : AccessibilityService() {
                 settings.mediaPlaybackRequiresUserGesture = false
                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 addJavascriptInterface(core, "AndroidNative")
-                webChromeClient = WebChromeClient()
+                webChromeClient = object : WebChromeClient() {
+                    override fun onGeolocationPermissionsShowPrompt(
+                        origin: String?,
+                        callback: GeolocationPermissions.Callback?
+                    ) {
+                        callback?.invoke(origin, true, false)
+                    }
+                }
 
                 var booted = false
                 webViewClient = object : WebViewClient() {
@@ -1079,7 +1199,9 @@ class PyAccessibilityService : AccessibilityService() {
                 }
             }
 
-            container.addView(topBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (26 * density).toInt()))
+            if (!bubble) {
+                container.addView(topBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (26 * density).toInt()))
+            }
             container.addView(wv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
             floatContainer = container
@@ -1112,8 +1234,8 @@ class PyAccessibilityService : AccessibilityService() {
         val container = floatContainer ?: return false
         val density = resources.displayMetrics.density
         mainHandler.post {
-            params.width = (widthDp.coerceIn(140, 440) * density).toInt()
-            params.height = (heightDp.coerceIn(80, 700) * density).toInt()
+            params.width = (widthDp.coerceIn(40, 440) * density).toInt()
+            params.height = (heightDp.coerceIn(40, 700) * density).toInt()
             try { wm?.updateViewLayout(container, params) } catch (_: Exception) {}
         }
         return true
@@ -1122,12 +1244,87 @@ class PyAccessibilityService : AccessibilityService() {
     fun moveFloating(xPx: Int, yPx: Int): Boolean {
         val params = floatParams ?: return false
         val container = floatContainer ?: return false
+        val dm = resources.displayMetrics
         mainHandler.post {
-            params.x = xPx
-            params.y = yPx
+            params.x = xPx.coerceIn(0, (dm.widthPixels - params.width).coerceAtLeast(0))
+            params.y = yPx.coerceIn(0, (dm.heightPixels - params.height).coerceAtLeast(0))
             try { wm?.updateViewLayout(container, params) } catch (_: Exception) {}
         }
         return true
+    }
+
+    fun snapFloatingToEdge(durationMs: Int): Boolean {
+        val params = floatParams ?: return false
+        val container = floatContainer ?: return false
+        val dm = resources.displayMetrics
+        mainHandler.post {
+            val margin = (8 * dm.density).toInt()
+            val maxX = (dm.widthPixels - params.width - margin).coerceAtLeast(margin)
+            val maxY = (dm.heightPixels - params.height - margin).coerceAtLeast(margin)
+            val endX = if (params.x + params.width / 2 < dm.widthPixels / 2) margin else maxX
+            val endY = params.y.coerceIn(margin, maxY)
+            val startX = params.x
+            val startY = params.y
+            val anim = ValueAnimator.ofFloat(0f, 1f)
+            anim.duration = durationMs.toLong().coerceIn(50L, 600L)
+            anim.addUpdateListener { a ->
+                val t = a.animatedValue as Float
+                params.x = (startX + (endX - startX) * t).toInt()
+                params.y = (startY + (endY - startY) * t).toInt()
+                try { wm?.updateViewLayout(container, params) } catch (_: Exception) {}
+            }
+            anim.start()
+        }
+        return true
+    }
+
+    fun getFloatingInfo(): String {
+        val params = floatParams ?: return "{}"
+        return JSONObject().apply {
+            put("x", params.x)
+            put("y", params.y)
+            put("width", params.width)
+            put("height", params.height)
+            put("density", resources.displayMetrics.density.toDouble())
+        }.toString()
+    }
+
+    fun animateFloating(xPx: Int, yPx: Int, widthDp: Int, heightDp: Int, durationMs: Int): Boolean {
+        val params = floatParams ?: return false
+        val container = floatContainer ?: return false
+        val density = resources.displayMetrics.density
+        mainHandler.post {
+            val targetW = (widthDp.coerceIn(40, 440) * density).toInt()
+            val targetH = (heightDp.coerceIn(40, 700) * density).toInt()
+            val startW = params.width
+            val startH = params.height
+            val startX = params.x
+            val startY = params.y
+            val endX = if (xPx < 0) startX else xPx
+            val endY = if (yPx < 0) startY else yPx
+            val anim = ValueAnimator.ofFloat(0f, 1f)
+            anim.duration = durationMs.toLong().coerceIn(50L, 1200L)
+            anim.addUpdateListener { a ->
+                val t = a.animatedValue as Float
+                params.width = (startW + (targetW - startW) * t).toInt()
+                params.height = (startH + (targetH - startH) * t).toInt()
+                params.x = (startX + (endX - startX) * t).toInt()
+                params.y = (startY + (endY - startY) * t).toInt()
+                try { wm?.updateViewLayout(container, params) } catch (_: Exception) {}
+            }
+            anim.start()
+        }
+        return true
+    }
+
+    fun setFloatingFocusable(enabled: Boolean) {
+        val params = floatParams ?: return
+        val container = floatContainer ?: return
+        mainHandler.post {
+            if (enabled) params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+            else params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            try { wm?.updateViewLayout(container, params) } catch (_: Exception) {}
+        }
     }
 
     fun setFloatingKeepScreenOn(enabled: Boolean) {
@@ -1276,7 +1473,14 @@ class MainActivity : Activity() {
         }
 
         webView.addJavascriptInterface(nativeCore, "AndroidNative")
-        webView.webChromeClient = WebChromeClient()
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String?,
+                callback: GeolocationPermissions.Callback?
+            ) {
+                callback?.invoke(origin, true, false)
+            }
+        }
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(
                 view: WebView?,
@@ -1696,6 +1900,7 @@ class MainActivity : Activity() {
       <input id="_host_ed_name" class="_host_input" placeholder="my_app.py" />
       <textarea id="_host_ed_code" class="_host_textarea" placeholder="HTML = '''...'''"></textarea>
       <div class="_host_modal_footer">
+        <button class="_host_btn" style="margin-right:auto" onclick="pasteFromClipboard()">📋 Paste</button>
         <button class="_host_btn" onclick="closeEditor()">Cancel</button>
         <button class="_host_btn primary" onclick="saveFromEditor()">Save App</button>
       </div>
@@ -1729,6 +1934,7 @@ class MainActivity : Activity() {
       "    <button class='btn' onclick='pywebview.api.snap_photo()'>Take Picture</button>",
       "    <button class='btn red' onclick='pywebview.api.toggle_record()'>Record Audio</button>",
       "    <button class='btn green' onclick='pywebview.api.list_apps()'>Find Apps</button>",
+      "    <button class='btn' style='background:#0891b2;grid-column:1/-1' onclick='pywebview.api.my_location()'>My Location</button>",
       "    <button class='btn purple' onclick='pywebview.api.float_demo()'>Test Floating</button>",
       "  </div>",
       "  <div id='log' class='log'>Ready. Tap any native control above.</div>",
@@ -1773,6 +1979,13 @@ class MainActivity : Activity() {
       "    apps = json.loads(AndroidNative.listInstalledApps())",
       "    names = [a['name'] + ' (' + a['packageName'] + ')' for a in apps[:8]]",
       "    log('First 8 installed apps:\\n' + '\\n'.join(names))",
+      "",
+      "def my_location():",
+      "    res = json.loads(AndroidNative.getLocation())",
+      "    if res.get('ok'):",
+      "        log('Lat: ' + str(round(res['lat'], 5)) + '   Lon: ' + str(round(res['lon'], 5)) + '\\nAccuracy: ' + str(round(res['accuracy'], 1)) + ' m (' + res.get('provider', '') + ')')",
+      "    else:",
+      "        log(res.get('error', 'No location'))",
       "",
       "def float_demo():",
       "    ok = AndroidNative.startFloating(\"<div style='padding:10px;font-size:13px;font-weight:700;'>Floating Python Ready! Drag me over any app.</div>\", 230, 95)",
@@ -2051,6 +2264,24 @@ class MainActivity : Activity() {
 
     function closeEditor() {
       document.getElementById("_host_modal").classList.remove("open");
+    }
+
+    // Paste straight from the native clipboard (no keyboard/IME size limits).
+    function pasteFromClipboard() {
+      const ta = document.getElementById("_host_ed_code");
+      let text = "";
+      try { text = AndroidNative.getClipboard() || ""; } catch (e) { text = ""; }
+      if (!text) {
+        try { AndroidNative.toast("Clipboard is empty or blocked"); } catch (e) {}
+        return;
+      }
+      const start = ta.selectionStart != null ? ta.selectionStart : ta.value.length;
+      const end = ta.selectionEnd != null ? ta.selectionEnd : ta.value.length;
+      ta.value = ta.value.substring(0, start) + text + ta.value.substring(end);
+      const pos = start + text.length;
+      ta.focus();
+      try { ta.setSelectionRange(pos, pos); } catch (e) {}
+      try { AndroidNative.toast("Pasted " + text.length + " characters"); } catch (e) {}
     }
 
     function saveFromEditor() {
