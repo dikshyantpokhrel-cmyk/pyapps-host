@@ -1011,6 +1011,7 @@ class PyAccessibilityService : AccessibilityService() {
     private var floatContainer: LinearLayout? = null
     private var floatWebView: WebView? = null
     private var floatParams: WindowManager.LayoutParams? = null
+    private var floatAnim: ValueAnimator? = null
     private var nativeCore: NativeCore? = null
 
     private val pyodideCacheDir: File by lazy {
@@ -1134,19 +1135,115 @@ class PyAccessibilityService : AccessibilityService() {
             var startY = 0
             var touchX = 0f
             var touchY = 0f
+            var dragX = 0
+            var dragY = 0
+            var dragMoved = false
+            var dragPending = false
+            val dragSlop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+            val dragFrame = Runnable {
+                dragPending = false
+                params.x = dragX
+                params.y = dragY
+                try { windowMgr.updateViewLayout(container, params) } catch (_: Exception) {}
+            }
             topBar.setOnTouchListener { _, event ->
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
+                        floatAnim?.cancel()
                         startX = params.x
                         startY = params.y
+                        dragX = startX
+                        dragY = startY
+                        dragMoved = false
                         touchX = event.rawX
                         touchY = event.rawY
                         true
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        params.x = startX + (event.rawX - touchX).toInt()
-                        params.y = startY + (event.rawY - touchY).toInt()
-                        try { windowMgr.updateViewLayout(container, params) } catch (_: Exception) {}
+                        val dm = resources.displayMetrics
+                        val ddx = event.rawX - touchX
+                        val ddy = event.rawY - touchY
+                        if (dragMoved || Math.abs(ddx) >= dragSlop || Math.abs(ddy) >= dragSlop) {
+                            dragMoved = true
+                            dragX = (startX + ddx.toInt()).coerceIn(0, (dm.widthPixels - params.width).coerceAtLeast(0))
+                            dragY = (startY + ddy.toInt()).coerceIn(0, (dm.heightPixels - params.height).coerceAtLeast(0))
+                            if (!dragPending) {
+                                dragPending = true
+                                container.postOnAnimation(dragFrame)
+                            }
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        container.removeCallbacks(dragFrame)
+                        dragPending = false
+                        if (dragMoved) {
+                            params.x = dragX
+                            params.y = dragY
+                            try { windowMgr.updateViewLayout(container, params) } catch (_: Exception) {}
+                            snapFloatingToEdge(180)
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            }
+
+            val resizeHandle = TextView(this).apply {
+                text = "◢"
+                textSize = 12f
+                gravity = Gravity.END or Gravity.BOTTOM
+                setTextColor(Color.parseColor("#a1a1aa"))
+                setPadding(0, 0, (4 * density).toInt(), (3 * density).toInt())
+                alpha = 0.7f
+            }
+            var rStartW = 0
+            var rStartH = 0
+            var rTouchX = 0f
+            var rTouchY = 0f
+            var rW = 0
+            var rH = 0
+            var rPending = false
+            val rFrame = Runnable {
+                rPending = false
+                params.width = rW
+                params.height = rH
+                try { windowMgr.updateViewLayout(container, params) } catch (_: Exception) {}
+            }
+            resizeHandle.setOnTouchListener { _, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        floatAnim?.cancel()
+                        rStartW = params.width
+                        rStartH = params.height
+                        rW = rStartW
+                        rH = rStartH
+                        rTouchX = event.rawX
+                        rTouchY = event.rawY
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dm = resources.displayMetrics
+                        val minW = minOf((140 * density).toInt(), rStartW)
+                        val minH = minOf((80 * density).toInt(), rStartH)
+                        val maxW = maxOf(minW, minOf((440 * density).toInt(), dm.widthPixels - params.x))
+                        val maxH = maxOf(minH, minOf((700 * density).toInt(), dm.heightPixels - params.y))
+                        rW = (rStartW + (event.rawX - rTouchX).toInt()).coerceIn(minW, maxW)
+                        rH = (rStartH + (event.rawY - rTouchY).toInt()).coerceIn(minH, maxH)
+                        if (!rPending) {
+                            rPending = true
+                            container.postOnAnimation(rFrame)
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        container.removeCallbacks(rFrame)
+                        rPending = false
+                        if (rW != params.width || rH != params.height) {
+                            params.width = rW
+                            params.height = rH
+                            try { windowMgr.updateViewLayout(container, params) } catch (_: Exception) {}
+                        }
                         true
                     }
                     else -> false
@@ -1202,7 +1299,17 @@ class PyAccessibilityService : AccessibilityService() {
             if (!bubble) {
                 container.addView(topBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (26 * density).toInt()))
             }
-            container.addView(wv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            if (!bubble) {
+                val body = FrameLayout(this)
+                body.addView(wv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                body.addView(
+                    resizeHandle,
+                    FrameLayout.LayoutParams((20 * density).toInt(), (20 * density).toInt(), Gravity.BOTTOM or Gravity.END)
+                )
+                container.addView(body, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            } else {
+                container.addView(wv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            }
 
             floatContainer = container
             floatWebView = wv
@@ -1218,6 +1325,8 @@ class PyAccessibilityService : AccessibilityService() {
     }
 
     private fun removeFloatingInternal() {
+        floatAnim?.cancel()
+        floatAnim = null
         try {
             floatWebView?.destroy()
         } catch (_: Exception) {}
@@ -1234,9 +1343,22 @@ class PyAccessibilityService : AccessibilityService() {
         val container = floatContainer ?: return false
         val density = resources.displayMetrics.density
         mainHandler.post {
-            params.width = (widthDp.coerceIn(40, 440) * density).toInt()
-            params.height = (heightDp.coerceIn(40, 700) * density).toInt()
-            try { wm?.updateViewLayout(container, params) } catch (_: Exception) {}
+            val targetW = (widthDp.coerceIn(40, 440) * density).toInt()
+            val targetH = (heightDp.coerceIn(40, 700) * density).toInt()
+            val startW = params.width
+            val startH = params.height
+            floatAnim?.cancel()
+            val anim = ValueAnimator.ofFloat(0f, 1f)
+            anim.duration = 160L
+            anim.interpolator = android.view.animation.DecelerateInterpolator()
+            anim.addUpdateListener { a ->
+                val t = a.animatedValue as Float
+                params.width = (startW + (targetW - startW) * t).toInt()
+                params.height = (startH + (targetH - startH) * t).toInt()
+                try { wm?.updateViewLayout(container, params) } catch (_: Exception) {}
+            }
+            floatAnim = anim
+            anim.start()
         }
         return true
     }
@@ -1265,6 +1387,7 @@ class PyAccessibilityService : AccessibilityService() {
             val endY = params.y.coerceIn(margin, maxY)
             val startX = params.x
             val startY = params.y
+            floatAnim?.cancel()
             val anim = ValueAnimator.ofFloat(0f, 1f)
             anim.duration = durationMs.toLong().coerceIn(50L, 600L)
             anim.addUpdateListener { a ->
@@ -1273,6 +1396,7 @@ class PyAccessibilityService : AccessibilityService() {
                 params.y = (startY + (endY - startY) * t).toInt()
                 try { wm?.updateViewLayout(container, params) } catch (_: Exception) {}
             }
+            floatAnim = anim
             anim.start()
         }
         return true
@@ -1420,6 +1544,7 @@ class PyAccessibilityService : AccessibilityService() {
                 put("text", t)
                 put("desc", d)
                 put("id", node.viewIdResourceName ?: "")
+                put("pkg", node.packageName?.toString() ?: "")
                 put("clickable", node.isClickable)
                 put("x", rect.centerX())
                 put("y", rect.centerY())
