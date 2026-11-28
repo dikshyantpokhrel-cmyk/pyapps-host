@@ -773,6 +773,11 @@ class NativeCore(
     }
 
     @JavascriptInterface
+    fun getMapsDebug(): String {
+        return PyAccessibilityService.lastNotifLog ?: ""
+    }
+
+    @JavascriptInterface
     fun getClipboard(): String {
         var res = ""
         val latch = CountDownLatch(1)
@@ -879,6 +884,9 @@ class PyAccessibilityService : AccessibilityService() {
         // notification (title/text + the PendingIntent data/extras). JSON string.
         @Volatile
         var lastMapsDest: String = ""
+
+        @Volatile
+        var lastNotifLog: String = ""
 
         private val FLOAT_HTML = """
 <!DOCTYPE html>
@@ -1070,7 +1078,8 @@ class PyAccessibilityService : AccessibilityService() {
         val ev = event ?: return
         val pkg = ev.packageName?.toString() ?: ""
         if (ev.eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) return
-        if (!pkg.contains("maps")) return
+        // Do NOT filter on packageName here — it is frequently null for
+        // notification events. Store the notification and let Python decide.
         try {
             // Notification events expose the Notification as parcelableData.
             val notif: Notification? = ev.parcelableData as? Notification
@@ -1107,7 +1116,20 @@ class PyAccessibilityService : AccessibilityService() {
             }
             o.put("intents", intents)
             o.put("ts", System.currentTimeMillis())
-            lastMapsDest = o.toString()
+            val snapshot = o.toString()
+
+            // Keep a short rolling log for diagnosis (packageName is often null).
+            val previous = lastNotifLog
+            lastNotifLog = (snapshot + "\n" + previous).take(6000)
+
+            val text = (o.getString("title") + " " + o.getString("text") + " " + o.getString("big"))
+            val isMaps = pkg.contains("maps") || o.getString("pkg").contains("maps") ||
+                text.contains("navigation", ignoreCase = true) ||
+                text.contains("google maps", ignoreCase = true) ||
+                snapshot.contains("maps.app.goo.gl", ignoreCase = true) ||
+                snapshot.contains("google.navigation", ignoreCase = true) ||
+                snapshot.contains("maps.google.com", ignoreCase = true)
+            if (isMaps) lastMapsDest = snapshot
         } catch (_: Exception) {
         }
     }
