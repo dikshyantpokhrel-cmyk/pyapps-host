@@ -1072,12 +1072,8 @@ class PyAccessibilityService : AccessibilityService() {
         if (ev.eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) return
         if (!pkg.contains("maps")) return
         try {
-            val notif: Notification? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                ev.extras?.getParcelable("notification", Notification::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                ev.extras?.getParcelable("notification")
-            }
+            // Notification events expose the Notification as parcelableData.
+            val notif: Notification? = ev.parcelableData as? Notification
             if (notif == null) return
 
             val o = JSONObject()
