@@ -7,6 +7,7 @@ import android.animation.ValueAnimator
 import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
+import android.app.PendingIntent
 import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -767,6 +768,11 @@ class NativeCore(
     }
 
     @JavascriptInterface
+    fun getMapsDest(): String {
+        return PyAccessibilityService.lastMapsDest ?: ""
+    }
+
+    @JavascriptInterface
     fun getClipboard(): String {
         var res = ""
         val latch = CountDownLatch(1)
@@ -868,6 +874,11 @@ class PyAccessibilityService : AccessibilityService() {
     companion object {
         @Volatile
         var instance: PyAccessibilityService? = null
+
+        // Latest Google Maps navigation destination, captured from its own
+        // notification (title/text + the PendingIntent data/extras). JSON string.
+        @Volatile
+        var lastMapsDest: String = ""
 
         private val FLOAT_HTML = """
 <!DOCTYPE html>
@@ -1025,7 +1036,84 @@ class PyAccessibilityService : AccessibilityService() {
         nativeCore = NativeCore(this, null)
     }
 
+    private fun intentFrom(pi: PendingIntent?): Intent? {
+        if (pi == null) return null
+        for (field in arrayOf("mTarget", "mIntent")) {
+            try {
+                val f = PendingIntent::class.java.getDeclaredField(field)
+                f.isAccessible = true
+                val v = f.get(pi)
+                if (v is Intent) return v
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
+    private fun bundleToJson(b: Bundle?): JSONObject {
+        val o = JSONObject()
+        if (b == null) return o
+        try {
+            for (k in b.keySet()) {
+                try {
+                    val v = b.get(k)
+                    if (v !is android.graphics.Bitmap && v != null) o.put(k, v.toString())
+                } catch (_: Exception) {
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return o
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        val ev = event ?: return
+        val pkg = ev.packageName?.toString() ?: ""
+        if (ev.eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) return
+        if (!pkg.contains("maps")) return
+        try {
+            val notif: Notification? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ev.extras?.getParcelable("notification", Notification::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                ev.extras?.getParcelable("notification")
+            }
+            if (notif == null) return
+
+            val o = JSONObject()
+            o.put("pkg", pkg)
+            o.put("title", notif.extras?.getString(Notification.EXTRA_TITLE) ?: "")
+            o.put("text", notif.extras?.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: "")
+            o.put("big", notif.extras?.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: "")
+            o.put("extras", bundleToJson(notif.extras))
+
+            val intents = JSONArray()
+            val mainIntent = intentFrom(notif.contentIntent)
+            if (mainIntent != null) {
+                val io = JSONObject()
+                io.put("uri", mainIntent.dataString ?: "")
+                io.put("action", mainIntent.action ?: "")
+                io.put("extras", bundleToJson(mainIntent.extras))
+                intents.put(io)
+            }
+            try {
+                notif.actions?.forEach { a ->
+                    val ia = intentFrom(a.actionIntent)
+                    if (ia != null) {
+                        val io = JSONObject()
+                        io.put("uri", ia.dataString ?: "")
+                        io.put("action", ia.action ?: "")
+                        io.put("extras", bundleToJson(ia.extras))
+                        intents.put(io)
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            o.put("intents", intents)
+            o.put("ts", System.currentTimeMillis())
+            lastMapsDest = o.toString()
+        } catch (_: Exception) {
+        }
     }
 
     override fun onInterrupt() {
